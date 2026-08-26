@@ -1,6 +1,6 @@
 [package]
 name = "buac"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["Luxiere"]
 description = "Minimal UAC bypass library for Windows."
@@ -10,7 +10,11 @@ keywords = ["uac", "bypass", "elevation", "windows", "security"]
 categories = ["os::windows-apis"]
 repository = "https://github.com/luxxiere/buac"
 
-[dependencies]
+[package.metadata.docs.rs]
+default-target = "x86_64-pc-windows-msvc"
+targets = ["x86_64-pc-windows-msvc", "i686-pc-windows-msvc"]
+
+[target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_System_Com",

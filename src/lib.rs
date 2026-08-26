@@ -93,13 +93,20 @@ impl Ntdll {
     }
 }
 
+/// Errors returned by `buac` operations.
 #[derive(Debug)]
 pub enum Error {
+    /// Failed to initialize COM subsystem.
     ComInit(HRESULT),
+    /// Failed during PEB masquerading or NTDLL function resolution.
     Masquerade(&'static str),
+    /// Failed to activate the CMSTPLUA elevated COM moniker.
     Activation(HRESULT),
+    /// Failed during ICMLuaUtil::ShellExec execution.
     ShellExec(HRESULT),
+    /// Failed to query the process access token.
     TokenQuery(u32),
+    /// Failed to determine the path to the current executable.
     CurrentExePath(std::io::Error),
 }
 
@@ -167,6 +174,15 @@ fn encode_arg(arg: &str) -> String {
     result
 }
 
+struct TokenGuard(HANDLE);
+
+impl Drop for TokenGuard {
+    fn drop(&mut self) {
+        unsafe { CloseHandle(self.0) };
+    }
+}
+
+/// Checks whether the current process token is running with elevated (Administrator) privileges.
 pub fn is_elevated() -> Result<bool, Error> {
     unsafe {
         let mut token: HANDLE = null_mut();
@@ -174,12 +190,6 @@ pub fn is_elevated() -> Result<bool, Error> {
             return Err(Error::TokenQuery(GetLastError()));
         }
 
-        struct TokenGuard(HANDLE);
-        impl Drop for TokenGuard {
-            fn drop(&mut self) {
-                unsafe { CloseHandle(self.0) };
-            }
-        }
         let _guard = TokenGuard(token);
 
         let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
@@ -201,7 +211,6 @@ pub fn is_elevated() -> Result<bool, Error> {
     }
 }
 
-#[cfg(target_arch = "x86_64")]
 struct PebOffsets {
     ldr: usize,
     params: usize,
@@ -222,17 +231,6 @@ const OFFSETS: PebOffsets = PebOffsets {
     image_path: 0x60,
     command_line: 0x70,
 };
-
-#[cfg(target_arch = "x86")]
-struct PebOffsets {
-    ldr: usize,
-    params: usize,
-    in_load_order_list: usize,
-    full_dll_name: usize,
-    base_dll_name: usize,
-    image_path: usize,
-    command_line: usize,
-}
 
 #[cfg(target_arch = "x86")]
 const OFFSETS: PebOffsets = PebOffsets {
@@ -380,10 +378,11 @@ impl Drop for LuaUtilGuard {
     }
 }
 
+/// Executes a target binary elevated as Administrator using the CMSTPLUA COM elevation moniker.
+///
+/// Inherits the caller's current working directory.
 pub fn execute(target_path: &str, arguments: Option<&str>) -> Result<(), Error> {
     unsafe {
-        let _masquerade_guard = masquerade_process()?;
-
         let hr_init = CoInitializeEx(null(), COINIT_APARTMENTTHREADED as u32);
         let _com_guard = ComGuard {
             need_uninit: hr_init == S_OK || hr_init == S_FALSE,
@@ -393,22 +392,26 @@ pub fn execute(target_path: &str, arguments: Option<&str>) -> Result<(), Error> 
             return Err(Error::ComInit(hr_init));
         }
 
-        let mut bind_opts: BIND_OPTS3 = std::mem::zeroed();
-        bind_opts.Base.Base.cbStruct = std::mem::size_of::<BIND_OPTS3>() as u32;
-        bind_opts.Base.dwClassContext = CLSCTX_LOCAL_SERVER;
-
         let mut lua_util: *mut ICMLuaUtil = null_mut();
-        let hr_get = CoGetObject(
-            windows_sys::core::w!(
-                "Elevation:Administrator!new:{3E5FC7F9-9A51-4367-9063-A120244FBEC7}"
-            ),
-            &bind_opts as *const _ as *const _,
-            &IID_ICMLUAUTIL,
-            &mut lua_util as *mut _ as *mut *mut c_void,
-        );
+        {
+            let _masquerade_guard = masquerade_process()?;
 
-        if hr_get != S_OK || lua_util.is_null() {
-            return Err(Error::Activation(hr_get));
+            let mut bind_opts: BIND_OPTS3 = std::mem::zeroed();
+            bind_opts.Base.Base.cbStruct = std::mem::size_of::<BIND_OPTS3>() as u32;
+            bind_opts.Base.dwClassContext = CLSCTX_LOCAL_SERVER;
+
+            let hr_get = CoGetObject(
+                windows_sys::core::w!(
+                    "Elevation:Administrator!new:{3E5FC7F9-9A51-4367-9063-A120244FBEC7}"
+                ),
+                &bind_opts as *const _ as *const _,
+                &IID_ICMLUAUTIL,
+                &mut lua_util as *mut _ as *mut *mut c_void,
+            );
+
+            if hr_get != S_OK || lua_util.is_null() {
+                return Err(Error::Activation(hr_get));
+            }
         }
 
         let _lua_guard = LuaUtilGuard(lua_util);
@@ -417,11 +420,16 @@ pub fn execute(target_path: &str, arguments: Option<&str>) -> Result<(), Error> 
         let params_w = arguments.map(to_wide);
         let params_ptr = params_w.as_ref().map_or(null(), |p| p.as_ptr());
 
+        let cwd = std::env::current_dir()
+            .ok()
+            .map(|p| to_wide(&p.to_string_lossy()));
+        let cwd_ptr = cwd.as_ref().map_or(null(), |p| p.as_ptr());
+
         let hr_exec = ((*(*lua_util).lp_vtbl).shell_exec)(
             lua_util,
             file_w.as_ptr(),
             params_ptr,
-            null(),
+            cwd_ptr,
             0,
             SW_SHOW as u32,
         );
@@ -434,6 +442,10 @@ pub fn execute(target_path: &str, arguments: Option<&str>) -> Result<(), Error> 
     }
 }
 
+/// Spawns an elevated child instance of the current executable with original arguments.
+///
+/// Returns `Ok(true)` in the non-elevated parent process after successfully spawning the child.
+/// Returns `Ok(false)` if the current process is already elevated.
 pub fn spawn_elevated() -> Result<bool, Error> {
     if is_elevated()? {
         return Ok(false);
@@ -442,7 +454,11 @@ pub fn spawn_elevated() -> Result<bool, Error> {
     let current_exe = std::env::current_exe().map_err(Error::CurrentExePath)?;
     let current_exe_str = current_exe.to_string_lossy();
 
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let args: Vec<String> = std::env::args_os()
+        .skip(1)
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+
     let args_str = if args.is_empty() {
         None
     } else {
@@ -458,6 +474,10 @@ pub fn spawn_elevated() -> Result<bool, Error> {
     Ok(true)
 }
 
+/// Automatically restarts the current process with elevated privileges and terminates
+/// the non-elevated parent process immediately (`std::process::exit(0)`).
+///
+/// If already elevated, this function is a no-op and returns `Ok(())`.
 pub fn elevate() -> Result<(), Error> {
     if spawn_elevated()? {
         std::process::exit(0);

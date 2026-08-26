@@ -1,0 +1,20 @@
+[package]
+name = "buac"
+version = "0.1.0"
+edition = "2021"
+authors = ["Luxiere"]
+description = "Minimal UAC bypass library for Windows."
+readme = "README.md"
+license = "MIT"
+keywords = ["uac", "bypass", "elevation", "windows", "security"]
+categories = ["os::windows-apis"]
+
+[dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_Threading",
+    "Win32_Security",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_LibraryLoader",
+] }

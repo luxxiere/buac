@@ -8,6 +8,7 @@ readme = "README.md"
 license = "MIT"
 keywords = ["uac", "bypass", "elevation", "windows", "security"]
 categories = ["os::windows-apis"]
+repository = "https://github.com/luxxiere/buac"
 
 [dependencies]
 windows-sys = { version = "0.59", features = [

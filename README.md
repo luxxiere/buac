@@ -27,7 +27,7 @@ Add `buac` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-buac = "0.1.0"
+buac = "0.1.1"
 ```
 
 ---
